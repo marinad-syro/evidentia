@@ -1,0 +1,27 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.npm/
+
+# Data / binaries
+*.faiss
+*.parquet
+
+# Logs / audit
+.gstack/browse-audit.jsonl
+.gstack/browse-network.log
+
+# OS
+.DS_Store
