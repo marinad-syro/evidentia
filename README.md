@@ -1,6 +1,6 @@
-# Healthcare Provider Finder
+# Evidentia
 
-AI-powered provider search for India. Enter a plain-language health query — get ranked, verified providers near you with live trust scoring and a streaming progress feed.
+AI-powered healthcare provider search for India. Enter a plain-language health query — get ranked, verified providers near you with live trust scoring and a streaming progress feed.
 
 ## Setup
 
