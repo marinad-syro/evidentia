@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { SearchResults } from "../types";
+import { wsUrl } from "../lib/api";
 
 type VoiceStatus = "idle" | "connecting" | "listening" | "hearing" | "thinking" | "speaking" | "error";
 
@@ -159,8 +160,7 @@ export function VoiceInterface({ onResults, userLocation }: Props) {
       ctxRef.current = ctx;
       nextPlayRef.current = ctx.currentTime;
 
-      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${proto}//${window.location.host}/ws/voice`);
+      const ws = new WebSocket(wsUrl("/ws/voice"));
       wsRef.current = ws;
 
       ws.onopen = () => {

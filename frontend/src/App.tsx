@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useEffect } from "react";
+import { API_BASE } from "./lib/api";
 import "leaflet/dist/leaflet.css";
 import { SearchBar } from "./components/SearchBar";
 import { ProgressFeed } from "./components/ProgressFeed";
@@ -51,7 +52,7 @@ export default function App() {
     const locParam = userLocation && typeof userLocation === "object"
       ? `&lat=${userLocation.lat}&lon=${userLocation.lon}`
       : "";
-    const es = new EventSource(`/search?q=${encodeURIComponent(query)}${locParam}`);
+    const es = new EventSource(`${API_BASE}/search?q=${encodeURIComponent(query)}${locParam}`);
 
     es.addEventListener("step", (e) => {
       const data = JSON.parse(e.data) as { id: string; status: string; text: string; detail: string };

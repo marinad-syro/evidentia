@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { API_BASE } from "../lib/api";
 import DeckGL from "@deck.gl/react";
 import { GeoJsonLayer } from "@deck.gl/layers";
 import { HexagonLayer } from "@deck.gl/aggregation-layers";
@@ -56,8 +57,8 @@ export function DesertMap() {
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      fetch("/deserts/pincodes").then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-      fetch("/population").then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      fetch(`${API_BASE}/deserts/pincodes`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      fetch(`${API_BASE}/population`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
     ])
       .then(([pins, pop]) => { setData(pins); setPopData(pop); setLoading(false); })
       .catch(e => { setError(e.message); setLoading(false); });

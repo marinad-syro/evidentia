@@ -23,9 +23,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Healthcare Provider Finder", lifespan=lifespan)
 
+_extra_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000"] + _extra_origins,
     allow_methods=["GET"],
     allow_headers=["*"],
 )
