@@ -19,6 +19,14 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [userLocation, setUserLocation] = useState<UserLocation>({ lat: 19.1511, lon: 72.8829 });
   const [locLoading, setLocLoading] = useState(false);
+  const [backendOk, setBackendOk] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/health`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(() => setBackendOk(true))
+      .catch(() => setBackendOk(false));
+  }, []);
 
   const requestLocation = useCallback(() => {
     setLocLoading(true);
@@ -78,9 +86,13 @@ export default function App() {
     });
 
     es.addEventListener("error", (e) => {
-      if (e.type === "error" && (e as MessageEvent).data) {
-        const data = JSON.parse((e as MessageEvent).data);
-        setError(data.error ?? "An error occurred.");
+      const data = (e as MessageEvent).data;
+      if (data) {
+        try { setError(JSON.parse(data).error ?? "Search failed."); } catch { setError(data); }
+      } else {
+        setError(backendOk === false
+          ? "Cannot reach the backend. Check that the server is running."
+          : "Search connection failed — the backend may be unavailable.");
       }
       es.close();
       setLoading(false);
@@ -136,6 +148,18 @@ export default function App() {
             );
           })}
         </div>
+
+        {/* Backend status banner */}
+        {backendOk === false && (
+          <div style={{
+            background: "#fef2f2", border: "1px solid #fecaca",
+            borderRadius: 8, padding: "10px 14px", marginBottom: 16,
+            fontSize: 13, color: "#b91c1c",
+          }}>
+            ⚠️ Cannot reach the backend at <code>{API_BASE || window.location.origin}</code>.
+            {" "}Make sure the server is running and <code>VITE_API_URL</code> is set correctly.
+          </div>
+        )}
 
         {/* ── TEXT MODE ── */}
         {mode === "text" && (
