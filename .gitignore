@@ -16,11 +16,11 @@ node_modules/
 .npm/
 frontend/dist/
 
-# Data / pre-computed binaries (regenerate with pre_compute/)
-*.faiss
-*.parquet
-backend/data/trust.json
+# Raw source data (too large / sensitive for git)
 providers.csv
+
+# Pre-computed binaries committed directly — see backend/data/
+# (regenerate with pre_compute/embed.py and pre_compute/trust.py if needed)
 
 # Tooling / OS
 .gstack/
