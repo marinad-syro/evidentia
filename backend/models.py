@@ -22,8 +22,8 @@ class Provider:
     longitude: float
     distance_km: float = 0.0
     trust_score: int = 0
-    trust_signals: list[str] = field(default_factory=list)
-    trust_penalties: list[str] = field(default_factory=list)
+    trust_signals: list[dict] = field(default_factory=list)
+    trust_penalties: list[dict] = field(default_factory=list)
     live_verified: bool = False
     red_flags: list[str] = field(default_factory=list)
     why_this: str = ""

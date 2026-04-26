@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from openai import AsyncOpenAI
 
+from .databricks_client import filter_providers as db_filter
 from .geo import geocode, haversine_km
 from .specialty import resolve_specialty
 from .tavily_verify import verify_providers_parallel, VerificationResult
@@ -62,6 +63,233 @@ def load_data() -> None:
     print(f"Known specialty IDs: {len(_known_specialty_ids)}")
 
 
+# ── Medical desert grid ────────────────────────────────────────────────────────
+
+# Simplified clockwise India boundary polygon (lat, lon pairs).
+# Good enough for grid-cell filtering; not a legal border definition.
+_INDIA_POLY = [
+    (37.0, 75.0), (35.5, 77.0), (34.5, 78.5), (32.5, 78.5),
+    (30.0, 80.0), (28.8, 81.0), (28.0, 84.0), (27.5, 87.0),
+    (27.5, 88.5), (27.0, 91.5), (28.5, 97.5), (27.0, 97.0),
+    (25.5, 94.0), (24.0, 93.5), (23.5, 92.5), (22.0, 93.5),
+    (21.5, 92.5), (22.5, 91.8), (23.5, 91.5), (25.0, 89.5),
+    (26.5, 89.5), (22.5, 88.5), (20.5, 87.0), (17.5, 83.5),
+    (14.5, 80.5), (13.0, 80.5), (10.5, 80.0), (8.5, 78.0),
+    (8.0, 77.5),  (8.5, 76.5),  (10.0, 76.0), (12.5, 74.5),
+    (14.5, 74.0), (18.0, 72.5), (21.0, 69.0), (22.5, 68.5),
+    (23.5, 68.0), (25.0, 68.5), (27.0, 70.5), (29.0, 70.5),
+    (31.0, 71.5), (33.0, 74.0), (34.5, 73.5), (35.5, 74.5),
+    (37.0, 75.0),
+]
+
+
+def _in_india(lat: float, lon: float) -> bool:
+    """Ray-casting point-in-polygon against the simplified India boundary."""
+    inside = False
+    n = len(_INDIA_POLY)
+    j = n - 1
+    for i in range(n):
+        yi, xi = _INDIA_POLY[i]
+        yj, xj = _INDIA_POLY[j]
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+_desert_cache: dict | None = None
+
+
+def get_desert_grid(min_trust: int = 50, cell_deg: float = 0.5) -> dict:
+    """
+    Compute (once, then cache) a grid of 0.5° cells over India.
+    Each cell is classified by how far the nearest quality provider is.
+    Quality = trust_score >= min_trust AND valid coordinates.
+    """
+    global _desert_cache
+    if _desert_cache is not None:
+        return _desert_cache
+    assert _df is not None, "Data not loaded"
+
+    # ── 1. Build quality-provider arrays ──────────────────────────────────────
+    pids = _df["provider_id"].astype(str).values
+    trust_scores_arr = np.array([_trust.get(p, {}).get("score", 0) for p in pids])
+    lats_arr = pd.to_numeric(_df["latitude"],  errors="coerce").fillna(0).values.astype(float)
+    lons_arr = pd.to_numeric(_df["longitude"], errors="coerce").fillna(0).values.astype(float)
+
+    quality_mask = (
+        (trust_scores_arr >= min_trust)
+        & (lats_arr > 6) & (lats_arr < 38)   # rough India bounding box
+        & (lons_arr > 67) & (lons_arr < 98)
+    )
+    p_lats = lats_arr[quality_mask]
+    p_lons = lons_arr[quality_mask]
+    print(f"Desert grid: {quality_mask.sum()} quality providers (trust ≥ {min_trust})")
+
+    # ── 2. Grid cell centres ──────────────────────────────────────────────────
+    half = cell_deg / 2
+    lat_starts = np.arange(8.0,  37.0, cell_deg)
+    lon_starts = np.arange(68.0, 97.0, cell_deg)
+    s_lat, s_lon = np.meshgrid(lat_starts, lon_starts, indexing="ij")
+    c_lats = (s_lat + half).ravel()
+    c_lons = (s_lon + half).ravel()
+    s_lats = s_lat.ravel()
+    s_lons = s_lon.ravel()
+
+    # ── 3. Vectorised approximate distance (chunked to limit RAM) ─────────────
+    min_dists = np.full(len(c_lats), 9999.0)
+    chunk = 400
+    cos_lat = np.cos(np.radians(22.0))  # India centre latitude approximation
+    for i in range(0, len(c_lats), chunk):
+        dlat_km = (c_lats[i:i+chunk, None] - p_lats[None, :]) * 111.0
+        dlon_km = (c_lons[i:i+chunk, None] - p_lons[None, :]) * 111.0 * cos_lat
+        min_dists[i:i+chunk] = np.sqrt(dlat_km**2 + dlon_km**2).min(axis=1)
+
+    # ── 4. Build response ─────────────────────────────────────────────────────
+    cells = [
+        {"lat": float(s_lats[i]), "lon": float(s_lons[i]), "min_dist_km": round(float(min_dists[i]), 1)}
+        for i in range(len(c_lats))
+        if min_dists[i] >= 10 and _in_india(float(c_lats[i]), float(c_lons[i]))
+    ]
+
+    # Top reference providers (trust ≥ 65) for the dot layer — cap at 400
+    dot_mask = quality_mask & (trust_scores_arr >= 65)
+    dot_idx = np.where(dot_mask)[0]
+    dot_idx = dot_idx[np.argsort(trust_scores_arr[dot_idx])[::-1][:400]]
+    dots = [
+        {
+            "lat": round(float(lats_arr[i]), 5),
+            "lon": round(float(lons_arr[i]), 5),
+            "name": str(_df.iloc[i].get("name") or ""),
+            "trust_score": int(trust_scores_arr[i]),
+        }
+        for i in dot_idx
+    ]
+
+    n_desert     = sum(1 for c in cells if c["min_dist_km"] > 150)
+    n_underserved = sum(1 for c in cells if 50 < c["min_dist_km"] <= 150)
+    n_sparse     = sum(1 for c in cells if 10 < c["min_dist_km"] <= 50)
+
+    _desert_cache = {
+        "cells": cells,
+        "quality_providers": dots,
+        "cell_deg": cell_deg,
+        "stats": {
+            "quality_provider_count": int(quality_mask.sum()),
+            "desert_cells": n_desert,
+            "underserved_cells": n_underserved,
+            "sparse_cells": n_sparse,
+            "min_trust_used": min_trust,
+        },
+    }
+    print(f"Desert grid done: {n_desert} deserts, {n_underserved} underserved, {n_sparse} sparse")
+    return _desert_cache
+
+
+# ── PIN code service desert map ───────────────────────────────────────────────
+
+_SERVICES = {
+    "oncology":  {"specialty": ["oncology"], "text": ["oncolog"]},
+    "emergency": {"specialty": ["emergency"], "text": ["emergency"]},
+    "trauma":    {"specialty": ["trauma"],    "text": ["trauma"]},
+    "dialysis":  {"specialty": [],            "text": ["dialysis"]},
+}
+
+_pincode_cache: dict | None = None
+
+
+def _provider_has_service(row, service_key: str) -> bool:
+    """Return True if any specialty, capability, or procedure text matches the service."""
+    cfg = _SERVICES[service_key]
+    specialties  = _parse_list(row.get("specialties"))
+    capabilities = _parse_list(row.get("capability"))
+    procedures   = _parse_list(row.get("procedure"))
+
+    spec_text = " ".join(str(s).lower() for s in specialties)
+    free_text  = " ".join(str(s).lower() for s in capabilities + procedures)
+
+    for kw in cfg["specialty"]:
+        if kw in spec_text:
+            return True
+    for kw in cfg["text"]:
+        if kw in spec_text or kw in free_text:
+            return True
+    return False
+
+
+def get_pincode_grid() -> dict:
+    """
+    Group providers by PIN code. For each PIN × service combination classify as:
+      green  — at least one provider with that service AND trust ≥ 65
+      yellow — provider(s) claim the service but all have trust < 65
+      red    — no provider in this PIN offers the service at all
+    Returns centroid lat/lon per PIN derived from provider coordinates.
+    """
+    global _pincode_cache
+    if _pincode_cache is not None:
+        return _pincode_cache
+    assert _df is not None, "Data not loaded"
+
+    lats = pd.to_numeric(_df["latitude"],  errors="coerce")
+    lons = pd.to_numeric(_df["longitude"], errors="coerce")
+    pins = _df["address_zipOrPostcode"].astype(str).str.strip()
+
+    # Only keep rows with a valid 6-digit Indian PIN and valid India-bbox coords
+    valid = (
+        pins.str.match(r"^\d{6}$")
+        & lats.between(6, 38)
+        & lons.between(67, 98)
+    )
+
+    df = _df[valid].copy()
+    df["_lat"] = lats[valid].values
+    df["_lon"] = lons[valid].values
+    df["_pin"] = pins[valid].values
+    df["_trust"] = [_trust.get(str(pid), {}).get("score", 0)
+                    for pid in df["provider_id"].astype(str)]
+
+    pincode_rows: dict[str, list] = {}
+    for _, row in df.iterrows():
+        pincode_rows.setdefault(row["_pin"], []).append(row)
+
+    result_pins = []
+    stats: dict[str, dict[str, int]] = {
+        svc: {"green": 0, "yellow": 0, "red": 0} for svc in _SERVICES
+    }
+
+    for pin, rows in pincode_rows.items():
+        centroid_lat = float(np.mean([r["_lat"] for r in rows]))
+        centroid_lon = float(np.mean([r["_lon"] for r in rows]))
+
+        services: dict[str, str] = {}
+        for svc in _SERVICES:
+            matching = [r for r in rows if _provider_has_service(r, svc)]
+            if not matching:
+                label = "red"
+            elif any(r["_trust"] >= 65 for r in matching):
+                label = "green"
+            else:
+                label = "yellow"
+            services[svc] = label
+            stats[svc][label] += 1
+
+        result_pins.append({
+            "pin": pin,
+            "lat": round(centroid_lat, 5),
+            "lon": round(centroid_lon, 5),
+            "provider_count": len(rows),
+            "services": services,
+        })
+
+    print(f"PIN code grid done: {len(result_pins)} PINs processed")
+    _pincode_cache = {
+        "pincodes": result_pins,
+        "stats": stats,
+        "total_pincodes": len(result_pins),
+    }
+    return _pincode_cache
+
+
 def _get_openai() -> AsyncOpenAI:
     global _openai
     if _openai is None:
@@ -98,6 +326,14 @@ def _safe_int(val) -> int:
         return int(val)
     except (ValueError, TypeError):
         return 0
+
+
+def _normalize_url(url: str) -> str:
+    if not url or url in ("nan", "None"):
+        return ""
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return "https://" + url
 
 
 def _composite_score(trust_score: int, distance_km: float) -> float:
@@ -141,7 +377,7 @@ async def _embed_query(text: str) -> np.ndarray:
     return vec
 
 
-def _build_provider(row: pd.Series, distance_km: float, trust_score: int,
+def _build_provider(row: "pd.Series | dict", distance_km: float, trust_score: int,
                     trust_signals: list, trust_penalties: list) -> Provider:
     specialties = _parse_list(row.get("specialties"))
     procedures = _parse_list(row.get("procedure"))
@@ -159,7 +395,7 @@ def _build_provider(row: pd.Series, distance_km: float, trust_score: int,
         city=str(row.get("address_city") or ""),
         phone=str(row.get("officialPhone") or ""),
         email=str(row.get("email") or ""),
-        website=str(row.get("officialWebsite") or ""),
+        website=_normalize_url(str(row.get("officialWebsite") or "")),
         specialties=specialties,
         procedures=procedures,
         capabilities=capabilities,
@@ -216,17 +452,22 @@ async def _generate_cards(providers: list[Provider], query: str) -> None:
         caveats = []
         if p.number_doctors == 1:
             caveats.append("1-doctor clinic — for major procedures consider a larger hospital.")
-        if not any("affiliated" in s.lower() for s in p.trust_signals):
+        if not any("staff" in (s.get("text", "") if isinstance(s, dict) else s).lower() for s in p.trust_signals):
             caveats.append("Staff profiles not found — call ahead to confirm availability.")
         elif len(p.procedures) + len(p.capabilities) < 2:
             caveats.append("Limited clinical detail listed — verify scope of services by phone.")
         p.caveat = " ".join(caveats)
 
 
-async def run_search(query: str) -> AsyncGenerator[str, None]:
+async def run_search(
+    query: str,
+    provided_lat: float | None = None,
+    provided_lon: float | None = None,
+) -> AsyncGenerator[str, None]:
     """
     Main search pipeline. Yields SSE-formatted strings.
     Pipeline: intent → specialty → geocode → FAISS → post-filter → trust → Tavily → cards → results
+    If provided_lat/lon are given, the geocoding step is skipped.
     """
     assert _index is not None and _df is not None, "Data not loaded"
 
@@ -250,7 +491,7 @@ async def run_search(query: str) -> AsyncGenerator[str, None]:
     location = intent.get("location", "")
     preference = intent.get("preference")
 
-    if not location:
+    if not location and (provided_lat is None or provided_lon is None):
         yield sse_error("Please include a location in your query, e.g. 'near Bangalore'.")
         return
 
@@ -264,71 +505,114 @@ async def run_search(query: str) -> AsyncGenerator[str, None]:
     yield sse("intent", "done", "Understanding your symptoms…",
               f"Mapped to: {specialty_label}")
 
-    # Step 2: Geocoding
-    yield sse("geo", "active", f"Locating {location}…")
-    try:
-        user_lat, user_lon = await geocode(location)
-    except ValueError as e:
-        yield sse_error(str(e))
-        return
-    yield sse("geo", "done", f"Locating {location}…", f"Found coordinates")
+    # Step 2: Location — use provided GPS coords or geocode the text location
+    if provided_lat is not None and provided_lon is not None:
+        user_lat, user_lon = provided_lat, provided_lon
+        location_label = location if location else "your location"
+        yield sse("geo", "done", "Using your current location…", "GPS coordinates provided")
+    else:
+        yield sse("geo", "active", f"Locating {location}…")
+        try:
+            user_lat, user_lon = await geocode(location)
+        except ValueError as e:
+            yield sse_error(str(e))
+            return
+        yield sse("geo", "done", f"Locating {location}…", "Found coordinates")
+        location_label = location
 
-    # Step 3: FAISS semantic search over full index
+    # Step 3: FAISS semantic search → candidate IDs → Databricks SQL filter
     radius_km = 10.0
-    yield sse("filter", "active", f"Looking for {specialty_label}s within {int(radius_km)} km of {location}…")
+    yield sse("filter", "active", f"Looking for {specialty_label}s within {int(radius_km)} km of {location_label}…")
 
     query_vec = await _embed_query(f"{specialty_desc} {specialty_label}")
     top_k = 200
     _, indices = _index.search(query_vec, top_k)
+
+    # Map FAISS indices → provider_id strings + keep rows for local fallback
     candidate_rows = _df.iloc[indices[0]]
+    candidate_ids = [
+        str(_df.iloc[i].get("provider_id", ""))
+        for i in indices[0] if i < len(_df)
+    ]
 
-    # Post-filter: specialty match + haversine radius
-    def matches(row: pd.Series) -> tuple[bool, float]:
-        try:
-            lat, lon = float(row.get("latitude") or 0), float(row.get("longitude") or 0)
-            if lat == 0 and lon == 0:
-                return False, 0.0
-            dist = haversine_km(user_lat, user_lon, lat, lon)
-            specialties = _parse_list(row.get("specialties"))
-            specialty_match = any(
-                s.lower() == specialty_id.lower() for s in specialties
-            )
-            if preference:
-                op_type = str(row.get("operatorTypeId") or "").lower()
-                if preference.lower() not in op_type:
-                    return False, dist
-            return specialty_match and dist <= radius_km, dist
-        except Exception:
-            return False, 0.0
+    DB_TIMEOUT = 12.0  # seconds before falling back to local pandas filter
 
-    filtered = []
-    for _, row in candidate_rows.iterrows():
-        ok, dist = matches(row)
-        if ok:
-            filtered.append((row, dist))
-
-    # Radius expansion if no results
-    if not filtered:
-        radius_km = 25.0
-        yield sse("filter", "active",
-                  f"No results within 10 km — expanding to {int(radius_km)} km…",
-                  "Expanding search radius")
-        for _, row in candidate_rows.iterrows():
+    def _local_filter(rows: pd.DataFrame, radius: float) -> tuple[list, dict]:
+        found, counts = [], dict(sent=len(rows), matched=0)
+        for _, row in rows.iterrows():
             try:
-                lat, lon = float(row.get("latitude") or 0), float(row.get("longitude") or 0)
+                lat = float(row.get("latitude") or 0)
+                lon = float(row.get("longitude") or 0)
+                if lat == 0 and lon == 0:
+                    continue
                 dist = haversine_km(user_lat, user_lon, lat, lon)
-                specialties = _parse_list(row.get("specialties"))
-                if any(s.lower() == specialty_id.lower() for s in specialties) and dist <= radius_km:
-                    filtered.append((row, dist))
+                if dist > radius:
+                    continue
+                specs = _parse_list(row.get("specialties"))
+                if not any(s.lower() == specialty_id.lower() for s in specs):
+                    continue
+                if preference:
+                    if preference.lower() not in str(row.get("operatorTypeId") or "").lower():
+                        continue
+                counts["matched"] += 1
+                found.append((row, dist))
             except Exception:
                 pass
+        return found, counts
 
-    yield sse("filter", "done",
-              f"Looking for {specialty_label}s within {int(radius_km)} km of {location}…",
-              f"Found {len(filtered)} candidates")
+    async def _filter(ids: list[str], rows: pd.DataFrame, radius: float) -> tuple[list, dict, str]:
+        """Try Databricks first; fall back to local on timeout or error."""
+        try:
+            result, stats = await asyncio.wait_for(
+                db_filter(ids, specialty_id, user_lat, user_lon, radius, preference),
+                timeout=DB_TIMEOUT,
+            )
+            return result, stats, "Databricks SQL"
+        except Exception:
+            result, stats = _local_filter(rows, radius)
+            return result, stats, "local fallback"
+
+    def _fmt(label: str, stats: dict, radius: float, source: str) -> str:
+        return (
+            f"{label} ({int(radius)} km, {source}):\n"
+            f"  Candidates : {stats['sent']}\n"
+            f"  Matched    : {stats['matched']}"
+        )
+
+    filter_log: list[str] = [
+        f"Dataset: {len(_df):,} providers total",
+        f"FAISS semantic search → top {top_k} candidate IDs retrieved",
+        "",
+    ]
+
+    filtered, stats1, src1 = await _filter(candidate_ids, candidate_rows, radius_km)
+    filter_log.append(_fmt("Pass 1", stats1, radius_km, src1))
+
+    # Radius expansion: 10 km → 25 km → 50 km
+    if not filtered:
+        radius_km = 25.0
+        yield sse("filter", "active", "No results within 10 km — expanding to 25 km…")
+        filtered, stats2, src2 = await _filter(candidate_ids, candidate_rows, radius_km)
+        filter_log += ["", _fmt("Pass 2 (expanded)", stats2, radius_km, src2)]
 
     if not filtered:
-        yield sse_error(f"No {specialty_label} providers found within {int(radius_km)} km of {location}.")
+        radius_km = 50.0
+        yield sse("filter", "active", "No results within 25 km — expanding to 50 km…")
+        _, wide_indices = _index.search(query_vec, 500)
+        wide_rows = _df.iloc[wide_indices[0]]
+        wide_ids = [
+            str(_df.iloc[i].get("provider_id", ""))
+            for i in wide_indices[0] if i < len(_df)
+        ]
+        filtered, stats3, src3 = await _filter(wide_ids, wide_rows, radius_km)
+        filter_log += ["", _fmt("Pass 3 (expanded, 500 candidates)", stats3, radius_km, src3)]
+
+    yield sse("filter", "done",
+              f"Looking for {specialty_label}s within {int(radius_km)} km of {location_label}…",
+              f"Found {len(filtered)} candidates\n\n" + "\n".join(filter_log))
+
+    if not filtered:
+        yield sse_error(f"No {specialty_label} providers found within {int(radius_km)} km of {location_label}.")
         return
 
     # Step 4: Apply trust scores + composite ranking
@@ -336,12 +620,19 @@ async def run_search(query: str) -> AsyncGenerator[str, None]:
     scored: list[tuple[float, Provider]] = []
     for row, dist in filtered[:25]:
         pid = str(row.get("provider_id", ""))
-        trust_entry = _trust.get(pid, {"score": 0, "signals": [], "penalties": []})
+        trust_entry = _trust.get(pid, {"score": 0, "signals": [], "penalties": [], "row": None})
         trust_score = trust_entry["score"]
+        data_row = trust_entry.get("row")
+
+        def _inject_row(sigs: list, row_num) -> list:
+            if not row_num:
+                return sigs
+            return [{**s, "row": row_num} if isinstance(s, dict) and "row" not in s else s for s in sigs]
+
         provider = _build_provider(
             row, dist, trust_score,
-            trust_entry.get("signals", []),
-            trust_entry.get("penalties", []),
+            _inject_row(trust_entry.get("signals", []), data_row),
+            _inject_row(trust_entry.get("penalties", []), data_row),
         )
         provider.final_score = _composite_score(trust_score, dist)
         scored.append((provider.final_score, provider))
@@ -368,7 +659,7 @@ async def run_search(query: str) -> AsyncGenerator[str, None]:
         provider.live_verified = vr.verified
         provider.red_flags = vr.red_flags
         if vr.trust_delta > 0:
-            provider.trust_signals.append("Live website verified ✓")
+            provider.trust_signals.append({"text": "Website was live-verified during this search", "col": "officialWebsite"})
         elif vr.trust_delta < 0:
             provider.trust_penalties.extend(vr.red_flags)
         # Re-score
@@ -408,12 +699,14 @@ async def run_search(query: str) -> AsyncGenerator[str, None]:
             "why_this": p.why_this,
             "caveat": p.caveat,
             "number_doctors": p.number_doctors,
+            "latitude": p.latitude,
+            "longitude": p.longitude,
         }
 
     results_data = json.dumps({
         "providers": [provider_to_dict(p) for p in top_providers],
         "specialty_interpreted": specialty_label,
-        "location_interpreted": location,
+        "location_interpreted": location_label,
         "radius_km": radius_km,
         "total_candidates": len(filtered),
     })

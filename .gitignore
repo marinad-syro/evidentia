@@ -14,14 +14,15 @@ build/
 # Node
 node_modules/
 .npm/
+frontend/dist/
 
-# Data / binaries
+# Data / pre-computed binaries (regenerate with pre_compute/)
 *.faiss
 *.parquet
+backend/data/trust.json
+providers.csv
 
-# Logs / audit
-.gstack/browse-audit.jsonl
-.gstack/browse-network.log
-
-# OS
+# Tooling / OS
+.gstack/
 .DS_Store
+*.log

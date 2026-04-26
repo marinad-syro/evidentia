@@ -1,3 +1,9 @@
+export interface TrustSignal {
+  text: string;
+  col: string;
+  row?: number;
+}
+
 export interface Provider {
   provider_id: string;
   name: string;
@@ -10,13 +16,15 @@ export interface Provider {
   specialties: string[];
   distance_km: number;
   trust_score: number;
-  trust_signals: string[];
-  trust_penalties: string[];
+  trust_signals: TrustSignal[];
+  trust_penalties: TrustSignal[];
   live_verified: boolean;
   red_flags: string[];
   why_this: string;
   caveat: string;
   number_doctors: number;
+  latitude: number;
+  longitude: number;
 }
 
 export interface SearchResults {

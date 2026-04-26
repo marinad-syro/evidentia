@@ -1,16 +1,46 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
+import "leaflet/dist/leaflet.css";
 import { SearchBar } from "./components/SearchBar";
 import { ProgressFeed } from "./components/ProgressFeed";
-import { ProviderCard } from "./components/ProviderCard";
+import { MapView } from "./components/MapView";
+import { DesertMap } from "./components/DesertMap";
+import { VoiceInterface } from "./components/VoiceInterface";
 import { Step, SearchResults } from "./types";
 
-const STEP_ORDER = ["intent", "geo", "filter", "rank", "trust", "done"];
+type Mode = "text" | "voice" | "deserts";
+type UserLocation = { lat: number; lon: number } | "denied" | null;
 
 export default function App() {
+  const [mode, setMode] = useState<Mode>("text");
   const [steps, setSteps] = useState<Step[]>([]);
   const [results, setResults] = useState<SearchResults | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [userLocation, setUserLocation] = useState<UserLocation>({ lat: 19.1511, lon: 72.8829 });
+  const [locLoading, setLocLoading] = useState(false);
+
+  const requestLocation = useCallback(() => {
+    setLocLoading(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setUserLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+        setLocLoading(false);
+      },
+      () => {
+        setUserLocation("denied");
+        setLocLoading(false);
+      },
+      { timeout: 8000 },
+    );
+  }, []);
+
+  const switchMode = (m: Mode) => {
+    setMode(m);
+    setResults(null);
+    setSteps([]);
+    setError(null);
+    setLoading(false);
+  };
 
   const runSearch = useCallback((query: string) => {
     setSteps([]);
@@ -18,7 +48,10 @@ export default function App() {
     setError(null);
     setLoading(true);
 
-    const es = new EventSource(`/search?q=${encodeURIComponent(query)}`);
+    const locParam = userLocation && typeof userLocation === "object"
+      ? `&lat=${userLocation.lat}&lon=${userLocation.lon}`
+      : "";
+    const es = new EventSource(`/search?q=${encodeURIComponent(query)}${locParam}`);
 
     es.addEventListener("step", (e) => {
       const data = JSON.parse(e.data) as { id: string; status: string; text: string; detail: string };
@@ -52,86 +85,177 @@ export default function App() {
       setLoading(false);
     });
 
-    es.onopen = () => {};
-
-    // Close when "done" step arrives
     const checkDone = (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data);
         if (data.id === "done" && data.status === "done") {
-          setTimeout(() => {
-            es.close();
-            setLoading(false);
-          }, 200);
+          setTimeout(() => { es.close(); setLoading(false); }, 200);
         }
       } catch {}
     };
     es.addEventListener("step", checkDone as EventListener);
-  }, []);
+  }, [userLocation]);
+
+  const loc = typeof userLocation === "object" ? userLocation : null;
 
   return (
-    <div style={{ maxWidth: 760, margin: "0 auto", padding: "40px 20px" }}>
-      {/* Header */}
-      <div style={{ textAlign: "center", marginBottom: 36 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 800, color: "#1e293b", marginBottom: 8 }}>
-          Healthcare Provider Finder
-        </h1>
-        <p style={{ fontSize: 15, color: "#64748b" }}>
-          Describe what you need in plain English — we'll find the right provider near you.
-        </p>
+    <div>
+      {/* ── Header + controls — 760px centered ── */}
+      <div style={{ maxWidth: 760, margin: "0 auto", padding: results ? "24px 20px 16px" : "60px 20px 40px" }}>
+
+        {/* Header */}
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <h1 style={{ fontSize: 34, fontWeight: 800, color: "#1e293b", marginBottom: 10 }}>
+            Evidentia
+          </h1>
+          <p style={{ fontSize: 17, color: "#64748b", marginBottom: 16 }}>
+            Describe your healthcare needs and we'll find the best providers for you.
+          </p>
+          <LocationPill location={userLocation} loading={locLoading} onRequest={requestLocation} />
+        </div>
+
+        {/* Mode toggle */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 20, justifyContent: "center" }}>
+          {(["text", "voice", "deserts"] as Mode[]).map((m) => {
+            const label = m === "text" ? "Text" : m === "voice" ? "🎙️ Voice" : "🏥 Desert Map";
+            return (
+              <button
+                key={m}
+                onClick={() => switchMode(m)}
+                style={{
+                  padding: "9px 24px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 15,
+                  fontWeight: 500,
+                  background: mode === m ? "#28030f" : "#f1f5f9",
+                  color: mode === m ? "#fff" : "#64748b",
+                  transition: "all 0.15s",
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* ── TEXT MODE ── */}
+        {mode === "text" && (
+          <>
+            <SearchBar onSearch={runSearch} loading={loading} />
+
+            {/* Example chips */}
+            {steps.length === 0 && !loading && !results && (
+              <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {["eye specialist near Koramangala", "heart doctor in Mumbai", "diabetes clinic in Pune"].map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => runSearch(q)}
+                    style={{
+                      padding: "5px 13px",
+                      background: "#f1f5f9",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: 20,
+                      fontSize: 13,
+                      color: "#475569",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Progress feed — shown while loading, hidden once map appears */}
+            {(steps.length > 0 || error) && !results && (
+              <div style={{ marginTop: 24 }}>
+                <ProgressFeed steps={steps} error={error} />
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── VOICE MODE ── */}
+        {mode === "voice" && (
+          <div style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            padding: "32px 0 24px",
+            background: "#fcfaf8",
+            borderRadius: 16,
+          }}>
+            <VoiceInterface
+              onResults={setResults}
+              userLocation={loc}
+            />
+          </div>
+        )}
       </div>
 
-      <SearchBar onSearch={runSearch} loading={loading} />
-
-      {/* Example queries */}
-      {steps.length === 0 && !loading && (
-        <div style={{ marginTop: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {[
-            "eye specialist near Koramangala",
-            "heart doctor in Mumbai",
-            "government hospital for diabetes in Pune",
-          ].map((q) => (
-            <button
-              key={q}
-              onClick={() => runSearch(q)}
-              style={{
-                padding: "6px 14px",
-                background: "#f1f5f9",
-                border: "1px solid #e2e8f0",
-                borderRadius: 20,
-                fontSize: 13,
-                color: "#475569",
-                cursor: "pointer",
-              }}
-            >
-              {q}
-            </button>
-          ))}
-        </div>
+      {/* ── Map — full viewport width, shown once results arrive ── */}
+      {mode !== "deserts" && results && (
+        <MapView results={results} userLocation={loc} />
       )}
 
-      {/* Progress feed */}
-      {(steps.length > 0 || error) && (
-        <div style={{ marginTop: 28 }}>
-          <ProgressFeed steps={steps} error={error} />
-        </div>
-      )}
-
-      {/* Results */}
-      {results && (
-        <div style={{ marginTop: 32 }}>
-          <div style={{ marginBottom: 16, fontSize: 13, color: "#64748b" }}>
-            Showing {results.providers.length} providers for{" "}
-            <strong>{results.specialty_interpreted}</strong> near{" "}
-            <strong>{results.location_interpreted}</strong> · {results.total_candidates} candidates scanned
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {results.providers.map((p, i) => (
-              <ProviderCard key={p.provider_id} provider={p} rank={i + 1} />
-            ))}
-          </div>
-        </div>
+      {/* ── Desert Map — full viewport width ── */}
+      {mode === "deserts" && (
+        <DesertMap />
       )}
     </div>
+  );
+}
+
+function LocationPill({
+  location,
+  loading,
+  onRequest,
+}: {
+  location: UserLocation;
+  loading: boolean;
+  onRequest: () => void;
+}) {
+  if (loading) {
+    return (
+      <span style={{ fontSize: 12, color: "#94a3b8" }}>
+        📍 Getting location…
+      </span>
+    );
+  }
+  if (location && typeof location === "object") {
+    return (
+      <span style={{
+        display: "inline-flex", alignItems: "center", gap: 4,
+        fontSize: 12, fontWeight: 500, color: "#16a34a",
+        background: "#f0fdf4", border: "1px solid #bbf7d0",
+        borderRadius: 20, padding: "3px 12px",
+      }}>
+        📍 Location enabled
+      </span>
+    );
+  }
+  if (location === "denied") {
+    return (
+      <span style={{
+        fontSize: 12, color: "#94a3b8",
+        background: "#f8fafc", border: "1px solid #e2e8f0",
+        borderRadius: 20, padding: "3px 12px",
+      }}
+        title="Allow location access in your browser settings and reload"
+      >
+        📍 Location blocked
+      </span>
+    );
+  }
+  return (
+    <button
+      onClick={onRequest}
+      style={{
+        fontSize: 12, fontWeight: 500, color: "#28030f",
+        background: "#f5e8ea", border: "1px solid #d4abb3",
+        borderRadius: 20, padding: "3px 12px",
+        cursor: "pointer",
+      }}
+    >
+      📍 Enable location
+    </button>
   );
 }

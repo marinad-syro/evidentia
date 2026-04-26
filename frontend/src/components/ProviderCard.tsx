@@ -1,9 +1,10 @@
 import React from "react";
-import { Provider } from "../types";
+import { Provider, TrustSignal } from "../types";
 
 interface Props {
   provider: Provider;
   rank: number;
+  compact?: boolean; // hides the mini-map iframe (used inside MapView sidebar)
 }
 
 function TrustBadge({ score, verified }: { score: number; verified: boolean }) {
@@ -35,15 +36,16 @@ function TrustBadge({ score, verified }: { score: number; verified: boolean }) {
   );
 }
 
-export function ProviderCard({ provider: p, rank }: Props) {
+export function ProviderCard({ provider: p, rank, compact = false }: Props) {
   return (
     <div
       style={{
         background: "#fff",
         border: "1px solid #e2e8f0",
         borderRadius: 14,
-        padding: "20px 24px",
+        padding: "20px 24px 20px 32px",
         position: "relative",
+        overflow: "visible",
       }}
     >
       {/* Rank badge */}
@@ -86,8 +88,8 @@ export function ProviderCard({ provider: p, rank }: Props) {
                 key={s}
                 style={{
                   padding: "2px 10px",
-                  background: "#eff6ff",
-                  color: "#3b82f6",
+                  background: "#f5e8ea",
+                  color: "#28030f",
                   borderRadius: 20,
                   fontSize: 12,
                   fontWeight: 500,
@@ -102,11 +104,21 @@ export function ProviderCard({ provider: p, rank }: Props) {
           <div style={{ fontSize: 13, color: "#475569", display: "flex", gap: 16, flexWrap: "wrap" }}>
             {p.phone && <span>📞 {p.phone}</span>}
             {p.website && (
-              <a href={p.website} target="_blank" rel="noopener noreferrer" style={{ color: "#3b82f6" }}>
+              <a href={p.website} target="_blank" rel="noopener noreferrer" style={{ color: "#7C5230" }}>
                 🌐 Website
               </a>
             )}
-            {p.address && <span>📍 {p.address}</span>}
+            {p.address && (() => {
+              const hasCoords = p.latitude && p.longitude;
+              const mapsUrl = hasCoords
+                ? `https://maps.google.com/?q=${p.latitude},${p.longitude}`
+                : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(p.address)}`;
+              return (
+                <a href={mapsUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#475569", textDecoration: "none" }}>
+                  📍 <span style={{ textDecoration: "underline", textDecorationStyle: "dotted" }}>{p.address}</span>
+                </a>
+              );
+            })()}
           </div>
 
           {/* Caveat */}
@@ -141,6 +153,19 @@ export function ProviderCard({ provider: p, rank }: Props) {
         <TrustBadge score={p.trust_score} verified={p.live_verified} />
       </div>
 
+      {/* Mini map — top result only, hidden inside MapView sidebar */}
+      {rank === 1 && !compact && p.latitude && p.longitude && (
+        <div style={{ marginTop: 14, borderRadius: 10, overflow: "hidden", border: "1px solid #e2e8f0" }}>
+          <iframe
+            title="Provider location"
+            width="100%"
+            height="130"
+            style={{ display: "block", border: "none" }}
+            src={`https://www.openstreetmap.org/export/embed.html?bbox=${p.longitude - 0.012},${p.latitude - 0.008},${p.longitude + 0.012},${p.latitude + 0.008}&layer=mapnik&marker=${p.latitude},${p.longitude}`}
+          />
+        </div>
+      )}
+
       {/* Trust signals */}
       {p.trust_signals.length > 0 && (
         <details style={{ marginTop: 12 }}>
@@ -148,9 +173,21 @@ export function ProviderCard({ provider: p, rank }: Props) {
             Trust signals ({p.trust_signals.length})
           </summary>
           <ul style={{ marginTop: 6, paddingLeft: 18, fontSize: 12, color: "#475569" }}>
-            {p.trust_signals.map((s, i) => (
-              <li key={i}>{s}</li>
-            ))}
+            {p.trust_signals.map((s, i) => {
+              const text = typeof s === "string" ? s : s.text;
+              const col = typeof s === "string" ? null : s.col;
+              const row = typeof s === "string" ? null : s.row;
+              return (
+                <li key={i}>
+                  {text}
+                  {(col || row != null) && (
+                    <span style={{ marginLeft: 5, color: "#94a3b8", fontFamily: "monospace", fontSize: 10 }}>
+                      ({[col, row != null ? `row ${row}` : null].filter(Boolean).join(" · ")})
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}

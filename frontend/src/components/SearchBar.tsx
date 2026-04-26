@@ -31,7 +31,7 @@ export function SearchBar({ onSearch, loading }: Props) {
           background: "#fff",
           transition: "border-color 0.15s",
         }}
-        onFocus={(e) => (e.target.style.borderColor = "#3b82f6")}
+        onFocus={(e) => (e.target.style.borderColor = "#28030f")}
         onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")}
       />
       <button
@@ -41,7 +41,7 @@ export function SearchBar({ onSearch, loading }: Props) {
           padding: "12px 24px",
           fontSize: 15,
           fontWeight: 600,
-          background: loading ? "#94a3b8" : "#3b82f6",
+          background: loading ? "#94a3b8" : "#28030f",
           color: "#fff",
           border: "none",
           borderRadius: 10,

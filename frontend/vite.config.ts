@@ -13,6 +13,27 @@ export default defineConfig({
         target: "http://localhost:8000",
         changeOrigin: true,
       },
+      "/deserts": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/deserts/pincodes": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/population": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/analysis": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/ws": {
+        target: "ws://localhost:8000",
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
   test: {
