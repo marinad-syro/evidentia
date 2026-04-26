@@ -57,20 +57,22 @@ export function DesertMap() {
   useEffect(() => {
     setLoading(true);
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), 45_000);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; abort.abort(); }, 45_000);
 
     const get = (path: string) =>
       fetch(`${API_BASE}${path}`, { signal: abort.signal })
         .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 
     Promise.all([get("/deserts/pincodes"), get("/population")])
-      .then(([pins, pop]) => { setData(pins); setPopData(pop); setLoading(false); })
+      .then(([pins, pop]) => { setData(pins); setPopData(pop); setError(null); setLoading(false); })
       .catch(e => {
-        if (e.name === "AbortError") {
-          setError("Request timed out — the backend may still be warming up. Try refreshing in 30 seconds.");
-        } else {
-          setError(e.message || "Unknown error");
-        }
+        if (e.name === "AbortError" && !timedOut) return; // React Strict Mode cleanup — ignore
+        setError(
+          e.name === "AbortError"
+            ? "Request timed out — the backend may still be warming up. Try refreshing in 30 seconds."
+            : (e.message || "Unknown error")
+        );
         setLoading(false);
       })
       .finally(() => clearTimeout(timer));

@@ -60,7 +60,8 @@ export default function App() {
     const locParam = userLocation && typeof userLocation === "object"
       ? `&lat=${userLocation.lat}&lon=${userLocation.lon}`
       : "";
-    const es = new EventSource(`${API_BASE}/search?q=${encodeURIComponent(query)}${locParam}`);
+    const url = `${API_BASE}/search?q=${encodeURIComponent(query)}${locParam}`;
+    const es = new EventSource(url);
 
     es.addEventListener("step", (e) => {
       const data = JSON.parse(e.data) as { id: string; status: string; text: string; detail: string };
