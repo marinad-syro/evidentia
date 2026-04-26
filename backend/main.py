@@ -15,9 +15,27 @@ from .api.search import get_desert_grid, get_pincode_grid, load_data, run_search
 from .api.voice import handle_voice_session
 
 
+async def _warmup():
+    """Pre-compute pincode need scores at startup so the first request is instant."""
+    try:
+        loop = asyncio.get_event_loop()
+        pincode_data, state_features = await asyncio.gather(
+            loop.run_in_executor(None, get_pincode_grid),
+            _ensure_state_features(),
+        )
+        global _pincode_enriched_cache
+        _pincode_enriched_cache = await loop.run_in_executor(
+            None, _sync_enrich_need_scores, pincode_data, state_features
+        )
+        print(f"[warmup] pincode need scores ready — {len(_pincode_enriched_cache['pincodes'])} PINs")
+    except Exception as e:
+        print(f"[warmup] need score enrichment failed ({e}), will retry on first request")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_data()
+    asyncio.create_task(_warmup())
     yield
 
 
@@ -66,14 +84,29 @@ async def deserts_pincodes():
     if _pincode_enriched_cache is not None:
         return JSONResponse(content=_pincode_enriched_cache)
 
+    # Warmup still running — return basic data immediately so the page loads,
+    # with need_score=0 as a fallback. The client can refresh once warmup is done.
     loop = asyncio.get_event_loop()
-    pincode_data, state_features = await asyncio.gather(
-        loop.run_in_executor(None, get_pincode_grid),
-        _ensure_state_features(),
-    )
-    _pincode_enriched_cache = await loop.run_in_executor(
-        None, _sync_enrich_need_scores, pincode_data, state_features
-    )
+    try:
+        pincode_data, state_features = await asyncio.wait_for(
+            asyncio.gather(
+                loop.run_in_executor(None, get_pincode_grid),
+                _ensure_state_features(),
+            ),
+            timeout=25,
+        )
+        _pincode_enriched_cache = await loop.run_in_executor(
+            None, _sync_enrich_need_scores, pincode_data, state_features
+        )
+    except Exception as e:
+        print(f"[pincodes] enrichment failed or timed out ({e}), returning base data")
+        pincode_data = await loop.run_in_executor(None, get_pincode_grid)
+        for pin in pincode_data["pincodes"]:
+            pin.setdefault("need_score", 0.0)
+            pin.setdefault("state", "")
+        # Don't cache the unenriched version so warmup can still populate it
+        return JSONResponse(content=pincode_data)
+
     return JSONResponse(content=_pincode_enriched_cache)
 
 

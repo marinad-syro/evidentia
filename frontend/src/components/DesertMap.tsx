@@ -56,17 +56,34 @@ export function DesertMap() {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([
-      fetch(`${API_BASE}/deserts/pincodes`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-      fetch(`${API_BASE}/population`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-    ])
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 45_000);
+
+    const get = (path: string) =>
+      fetch(`${API_BASE}${path}`, { signal: abort.signal })
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+
+    Promise.all([get("/deserts/pincodes"), get("/population")])
       .then(([pins, pop]) => { setData(pins); setPopData(pop); setLoading(false); })
-      .catch(e => { setError(e.message); setLoading(false); });
+      .catch(e => {
+        if (e.name === "AbortError") {
+          setError("Request timed out — the backend may still be warming up. Try refreshing in 30 seconds.");
+        } else {
+          setError(e.message || "Unknown error");
+        }
+        setLoading(false);
+      })
+      .finally(() => clearTimeout(timer));
+
+    return () => { abort.abort(); clearTimeout(timer); };
   }, []);
 
   if (loading) return (
     <div style={{ textAlign: "center", padding: "80px 20px", color: "#64748b", fontSize: 16 }}>
       Loading map data…
+      <div style={{ fontSize: 12, marginTop: 8, color: "#94a3b8" }}>
+        First load computes coverage scores — may take up to 30 s
+      </div>
     </div>
   );
   if (error) return (
